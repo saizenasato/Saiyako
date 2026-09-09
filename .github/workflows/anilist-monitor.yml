@@ -22,7 +22,6 @@ jobs:
         run: |
           mkdir -p ./state
 
-          # Find the most recent successful run that has our artifact
           RUN_ID=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
@@ -54,28 +53,27 @@ jobs:
         id: check
         run: |
           STATUS="up"
-          STATUS_CODE=""
           ERROR_MSG=""
 
-          RESPONSE=$(curl -s -o /tmp/anilist_body.json -w "%{http_code}" \
+          HTTP_CODE=$(curl -s -o /tmp/anilist_body.json -w "%{http_code}" \
             -X POST "https://graphql.anilist.co/" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d '{"query":"{ Media(id:1) { id } }"}')
+            -d '{"query":"{ Media(id:1) { id } }"' || echo "000")
 
-          STATUS_CODE="$RESPONSE"
           RAW_MSG=$(jq -r '.errors[0].message // ""' /tmp/anilist_body.json 2>/dev/null)
-          if echo "$RAW_MSG" | grep -iq "disabled"; then
+
+          if [ "$HTTP_CODE" -ne 200 ] || [ -n "$RAW_MSG" ]; then
             STATUS="down"
-            ERROR_MSG="$RAW_MSG"
+            ERROR_MSG="${RAW_MSG:-HTTP status code $HTTP_CODE}"
           fi
 
           ERROR_MSG=$(echo "$ERROR_MSG" | cut -c1-900)
 
           echo "STATUS=$STATUS" >> $GITHUB_OUTPUT
-          echo "STATUS_CODE=$STATUS_CODE" >> $GITHUB_OUTPUT
+          echo "STATUS_CODE=$HTTP_CODE" >> $GITHUB_OUTPUT
           echo "ERROR_MSG=$ERROR_MSG" >> $GITHUB_OUTPUT
-          echo "Current: $STATUS | Code: $STATUS_CODE | Error: $ERROR_MSG"
+          echo "Current: $STATUS | Code: $HTTP_CODE | Error: $ERROR_MSG"
 
       - name: Load Previous State
         id: prev
@@ -94,46 +92,38 @@ jobs:
       - name: Notify Down
         if: steps.check.outputs.STATUS == 'down' && steps.prev.outputs.PREV_STATUS != 'down'
         env:
-          WEBHOOK_KIWAMI: ${{ secrets.ANILIST_WEBHOOK_KIWAMI }}
-          ROLE_KIWAMI: ${{ secrets.ANILIST_ROLE_KIWAMI }}
+          WEBHOOK_URL: "https://discord.com/api/webhooks/1547119088155754517/Vu574qcp6j0wMnnD_8UyU1UsyKR6usZeqdG3O3DXafYXiDy04m7mKaTznD-2xQxc69ap"
+          ROLE_ID: "1541150515293982792"
         run: |
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           ERROR_MSG="${{ steps.check.outputs.ERROR_MSG }}"
           STATUS_CODE="${{ steps.check.outputs.STATUS_CODE }}"
 
-          send() {
-            local WEBHOOK="$1"
-            local ROLE="$2"
-            [ -z "$WEBHOOK" ] && return
+          PAYLOAD=$(jq -nc \
+            --arg role "$ROLE_ID" \
+            --arg error "$ERROR_MSG" \
+            --arg code "$STATUS_CODE" \
+            --arg ts "$TS" \
+            '{
+              content: (if $role != "" then "<@&\($role)>" else null end),
+              embeds: [{
+                title: "🔴 AniList is DOWN",
+                description: "**Error:** \($error)\n**Status Code:** \($code)",
+                color: 16729156,
+                footer: { text: "AniList Monitor" },
+                timestamp: $ts
+              }]
+            }')
 
-            PAYLOAD=$(jq -nc \
-              --arg role "$ROLE" \
-              --arg error "$ERROR_MSG" \
-              --arg code "$STATUS_CODE" \
-              --arg ts "$TS" \
-              '{
-                content: (if $role != "" then "<@&\($role)>" else null end),
-                embeds: [{
-                  title: "🔴 AniList is DOWN",
-                  description: "**Error:** \($error)\n**Status Code:** \($code)",
-                  color: 16729156,
-                  footer: { text: "AniList Monitor" },
-                  timestamp: $ts
-                }]
-              }')
-
-            curl -s -o /dev/null -w "Webhook: %{http_code}\n" \
-              -H "Content-Type: application/json" \
-              -X POST "$WEBHOOK" \
-              -d "$PAYLOAD"
-          }
-
-          send "$WEBHOOK_KIWAMI" "$ROLE_KIWAMI"
+          curl -s -o /dev/null -w "Webhook: %{http_code}\n" \
+            -H "Content-Type: application/json" \
+            -X POST "$WEBHOOK_URL" \
+            -d "$PAYLOAD"
 
       - name: Notify Up
         if: steps.check.outputs.STATUS == 'up' && steps.prev.outputs.PREV_STATUS == 'down'
         env:
-          WEBHOOK_KIWAMI: ${{ secrets.ANILIST_WEBHOOK_KIWAMI }}
+          WEBHOOK_URL: "https://discord.com/api/webhooks/1547119088155754517/Vu574qcp6j0wMnnD_8UyU1UsyKR6usZeqdG3O3DXafYXiDy04m7mKaTznD-2xQxc69ap"
         run: |
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           DOWN_SINCE="${{ steps.prev.outputs.DOWN_SINCE }}"
@@ -153,30 +143,23 @@ jobs:
             DURATION_STR="Unknown"
           fi
 
-          send() {
-            local WEBHOOK="$1"
-            [ -z "$WEBHOOK" ] && return
+          PAYLOAD=$(jq -nc \
+            --arg duration "$DURATION_STR" \
+            --arg ts "$TS" \
+            '{
+              embeds: [{
+                title: "🟢 AniList is back UP",
+                description: "**Downtime Duration:** \($duration)",
+                color: 4521096,
+                footer: { text: "AniList Monitor" },
+                timestamp: $ts
+              }]
+            }')
 
-            PAYLOAD=$(jq -nc \
-              --arg duration "$DURATION_STR" \
-              --arg ts "$TS" \
-              '{
-                embeds: [{
-                  title: "🟢 AniList is back UP",
-                  description: "**Downtime Duration:** \($duration)",
-                  color: 4521096,
-                  footer: { text: "AniList Monitor" },
-                  timestamp: $ts
-                }]
-              }')
-
-            curl -s -o /dev/null -w "Webhook: %{http_code}\n" \
-              -H "Content-Type: application/json" \
-              -X POST "$WEBHOOK" \
-              -d "$PAYLOAD"
-          }
-
-          send "$WEBHOOK_KIWAMI"
+          curl -s -o /dev/null -w "Webhook: %{http_code}\n" \
+            -H "Content-Type: application/json" \
+            -X POST "$WEBHOOK_URL" \
+            -d "$PAYLOAD"
 
       - name: Save State
         run: |
